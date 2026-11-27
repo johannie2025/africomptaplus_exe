@@ -57,14 +57,15 @@ function stk_migrate(int $l): void {
     stk_migrate_tables(); $pdo = db();
     $f = $pdo->prepare("SELECT 1 FROM w_settings WHERE license_id=? AND skey='stk_mig'"); $f->execute([$l]); if ($f->fetch()) return;
     $ev = stk_events($l, false); $op = $pdo->prepare("SELECT DISTINCT product_id FROM w_stock_moves WHERE license_id=? AND kind='opening'"); $op->execute([$l]); $has = array_flip($op->fetchAll(PDO::FETCH_COLUMN));
-    $s = $pdo->prepare('SELECT id,name,stock,buy_price,created_at,uid FROM w_products WHERE license_id=?'); $s->execute([$l]);
+    $s = $pdo->prepare('SELECT id,name,stock,buy_price,created_at FROM w_products WHERE license_id=?');
+    $s->execute([$l]);
     foreach ($s as $p) {
         if (isset($has[$p['id']])) continue;
         $e = $ev[$p['id']] ?? []; $net = 0; $first = null; $d = (string)$p['created_at'];
         usort($e, fn($a, $b) => [$a[0], $a[4]] <=> [$b[0], $b[4]]);
         foreach ($e as $x) { $net += $x[1] === 1 ? -$x[2] : $x[2]; if ($x[1] === 0 && $first === null) $first = $x[3]; if ($x[0] < $d) $d = $x[0]; }
         $q = (int)max(0, $p['stock'] - $net); if ($q <= 0) continue;
-        stk_move($l, (int)$p['id'], $p['name'], 'opening', $q, $first ?? (float)$p['buy_price'], 'Stock initial', '', $d, $p['uid'] ? 'op-' . $p['uid'] : null);
+        stk_move($l, (int)$p['id'], $p['name'], 'opening', $q, $first ?? (float)$p['buy_price'], 'Stock initial', '', $d, null);
     }
     $pdo->prepare("INSERT IGNORE INTO w_settings (license_id,skey,svalue) VALUES (?,'stk_mig','1')")->execute([$l]);
 }
