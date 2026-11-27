@@ -1,0 +1,8 @@
+{
+  "name": "africompta-desktop",
+  "version": "3.1.0",
+  "private": true,
+  "description": "AfriCompta+ — application de bureau (Windows / macOS / Linux) : enveloppe Tauri du panel web.",
+  "scripts": { "tauri": "tauri", "icons": "tauri icon app-icon.png", "build": "tauri build", "dev": "tauri dev" },
+  "devDependencies": { "@tauri-apps/cli": "^2.1.0" }
+}
