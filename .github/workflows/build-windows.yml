@@ -18,6 +18,7 @@ jobs:
     timeout-minutes: 45
     env:
       MARIADB_VERSION: ${{ inputs.mariadb_version || '10.11.9' }}
+      PANEL_URL: ${{ vars.PANEL_URL }}   # variable du dépôt : URL de base du panel (là où se trouve /api/index.php)
     steps:
       - uses: actions/checkout@v4
 
@@ -35,7 +36,7 @@ jobs:
         shell: pwsh
         run: |
           if (-not (Test-Path "server\web\index.php")) {
-            throw "Le dossier server/ doit contenir le contenu de africompta_server (admin, api, inc, sql, web...)."
+            throw "Le dossier server/ doit contenir le contenu de africompta_server (inc, sql, web... ; admin et api ne sont pas embarqués)."
           }
           php -m
 
@@ -66,20 +67,26 @@ jobs:
           $dist = Join-Path $PWD "dist\AfriCompta"
           New-Item -ItemType Directory -Force $dist, "$dist\app", "$dist\php", "$dist\mariadb", "$dist\runtime" | Out-Null
 
-          # Application (sans config locale de production)
-          Copy-Item "server\*" "$dist\app" -Recurse -Force
+          # Application web seule (sans panel admin ni API serveur, sans config de production)
+          New-Item -ItemType Directory -Force "$dist\app\web", "$dist\app\inc", "$dist\app\sql" | Out-Null
+          Copy-Item "server\web\*" "$dist\app\web" -Recurse -Force
+          Copy-Item "server\inc\*" "$dist\app\inc" -Recurse -Force
+          Copy-Item "server\sql\*" "$dist\app\sql" -Recurse -Force
           Remove-Item "$dist\app\inc\config.local.php" -Force -ErrorAction SilentlyContinue
-          Remove-Item "$dist\app\.gitkeep" -Force -ErrorAction SilentlyContinue
+          # Surcharges de l'édition autonome (activation de licence auprès du panel)
+          Copy-Item "desktop\overlay\*" "$dist\app" -Recurse -Force
+          if ($env:PANEL_URL) { Set-Content -Path "$dist\panel_url.txt" -Value $env:PANEL_URL.Trim() -Encoding ascii }
 
           # Runtime + lanceur
           Copy-Item "desktop\runtime\*" "$dist\runtime" -Recurse -Force
           Copy-Item "desktop\launcher\AfriCompta.exe" $dist
-          Copy-Item "desktop\AfriCompta-Admin.bat" $dist
 
           # PHP (celui installé par setup-php, avec ses DLL et extensions)
           $phpDir = Split-Path (Get-Command php).Source
           Copy-Item "$phpDir\*" "$dist\php" -Recurse -Force
           foreach ($d in 'dev', 'extras') { Remove-Item "$dist\php\$d" -Recurse -Force -ErrorAction SilentlyContinue }
+          # Certificats racine : HTTPS vers le panel (activation de licence)
+          Invoke-WebRequest "https://curl.se/ca/cacert.pem" -OutFile "$dist\php\cacert.pem"
 
           # MariaDB (allégé)
           $src = (Get-ChildItem mariadb_tmp -Directory | Select-Object -First 1).FullName
@@ -93,7 +100,7 @@ jobs:
             if (Test-Path $p) { Copy-Item $p "$dist\php" -Force; Copy-Item $p "$dist\mariadb\bin" -Force }
           }
 
-          foreach ($f in "php\php.exe", "php\ext\php_pdo_mysql.dll", "mariadb\bin\mysqld.exe", "mariadb\bin\mysql_install_db.exe", "AfriCompta.exe") {
+          foreach ($f in "php\php.exe", "php\ext\php_pdo_mysql.dll", "php\cacert.pem", "app\inc\desktop_license.php", "mariadb\bin\mysqld.exe", "mariadb\bin\mysql_install_db.exe", "AfriCompta.exe") {
             if (-not (Test-Path "$dist\$f")) { throw "Fichier manquant dans le build : $f" }
           }
 
