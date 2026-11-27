@@ -1,0 +1,127 @@
+name: Build AfriCompta+ portable (Windows)
+
+on:
+  workflow_dispatch:
+    inputs:
+      mariadb_version:
+        description: "Version de MariaDB à embarquer (LTS 10.11.x)"
+        default: "10.11.9"
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      MARIADB_VERSION: ${{ inputs.mariadb_version || '10.11.9' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.3"
+          extensions: mbstring, openssl, curl, pdo_mysql, mysqli, fileinfo
+          tools: none
+
+      - name: Vérifier les sources
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "server\web\index.php")) {
+            throw "Le dossier server/ doit contenir le contenu de africompta_server (admin, api, inc, sql, web...)."
+          }
+          php -m
+
+      - name: Compiler le lanceur (AfriCompta.exe)
+        shell: pwsh
+        working-directory: desktop/launcher
+        run: |
+          # Icône + manifeste (cosmétique : un échec ici n'arrête pas le build)
+          go install github.com/tc-hib/go-winres@latest
+          go-winres simply --icon ..\..\server\web\assets\icon-512.png --manifest gui --arch amd64
+          go build -trimpath -ldflags "-H windowsgui -s -w" -o AfriCompta.exe .
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Télécharger MariaDB portable
+        shell: pwsh
+        run: |
+          $v = $env:MARIADB_VERSION
+          $url = "https://archive.mariadb.org/mariadb-$v/winx64-packages/mariadb-$v-winx64.zip"
+          Write-Host "Téléchargement $url"
+          Invoke-WebRequest $url -OutFile mariadb.zip
+          Expand-Archive mariadb.zip -DestinationPath mariadb_tmp
+          Get-ChildItem mariadb_tmp | Select-Object Name
+
+      - name: Assembler le dossier portable
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dist = Join-Path $PWD "dist\AfriCompta"
+          New-Item -ItemType Directory -Force $dist, "$dist\app", "$dist\php", "$dist\mariadb", "$dist\runtime" | Out-Null
+
+          # Application (sans config locale de production)
+          Copy-Item "server\*" "$dist\app" -Recurse -Force
+          Remove-Item "$dist\app\inc\config.local.php" -Force -ErrorAction SilentlyContinue
+          Remove-Item "$dist\app\.gitkeep" -Force -ErrorAction SilentlyContinue
+
+          # Runtime + lanceur
+          Copy-Item "desktop\runtime\*" "$dist\runtime" -Recurse -Force
+          Copy-Item "desktop\launcher\AfriCompta.exe" $dist
+          Copy-Item "desktop\AfriCompta-Admin.bat" $dist
+
+          # PHP (celui installé par setup-php, avec ses DLL et extensions)
+          $phpDir = Split-Path (Get-Command php).Source
+          Copy-Item "$phpDir\*" "$dist\php" -Recurse -Force
+          foreach ($d in 'dev', 'extras') { Remove-Item "$dist\php\$d" -Recurse -Force -ErrorAction SilentlyContinue }
+
+          # MariaDB (allégé)
+          $src = (Get-ChildItem mariadb_tmp -Directory | Select-Object -First 1).FullName
+          Copy-Item "$src\*" "$dist\mariadb" -Recurse -Force
+          foreach ($d in 'include', 'mysql-test', 'sql-bench', 'docs', 'data') { Remove-Item "$dist\mariadb\$d" -Recurse -Force -ErrorAction SilentlyContinue }
+          Get-ChildItem "$dist\mariadb" -Recurse -Include *.pdb, *.lib | Remove-Item -Force
+
+          # Runtime Visual C++ en local (pour les PC sans redistribuable installé)
+          foreach ($dll in 'vcruntime140.dll', 'vcruntime140_1.dll', 'msvcp140.dll') {
+            $p = Join-Path $env:WINDIR "System32\$dll"
+            if (Test-Path $p) { Copy-Item $p "$dist\php" -Force; Copy-Item $p "$dist\mariadb\bin" -Force }
+          }
+
+          foreach ($f in "php\php.exe", "php\ext\php_pdo_mysql.dll", "mariadb\bin\mysqld.exe", "mariadb\bin\mysql_install_db.exe", "AfriCompta.exe") {
+            if (-not (Test-Path "$dist\$f")) { throw "Fichier manquant dans le build : $f" }
+          }
+
+      - name: Auto-test (démarre MariaDB + PHP et vérifie l'app)
+        shell: pwsh
+        run: |
+          $env:ACP_DATA = Join-Path $env:RUNNER_TEMP "acp-data"
+          $p = Start-Process -FilePath "dist\AfriCompta\AfriCompta.exe" -ArgumentList "--selftest" -Wait -PassThru
+          if (Test-Path "$env:ACP_DATA\selftest.txt") { Write-Host ("Résultat : " + (Get-Content "$env:ACP_DATA\selftest.txt" -Raw)) }
+          if ($p.ExitCode -ne 0) {
+            Get-ChildItem "$env:ACP_DATA\logs" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "=== $($_.Name) ==="; Get-Content $_.FullName -Tail 80 }
+            exit 1
+          }
+
+      - name: Nettoyer et compresser
+        shell: pwsh
+        run: |
+          Remove-Item "dist\AfriCompta\app\inc\config.local.php" -Force -ErrorAction SilentlyContinue
+          Compress-Archive -Path "dist\AfriCompta" -DestinationPath "AfriCompta-Portable-win64.zip" -CompressionLevel Optimal
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AfriCompta-Portable-win64
+          path: AfriCompta-Portable-win64.zip
+          if-no-files-found: error
+
+      - name: Publier la release (tags v*)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: AfriCompta-Portable-win64.zip
